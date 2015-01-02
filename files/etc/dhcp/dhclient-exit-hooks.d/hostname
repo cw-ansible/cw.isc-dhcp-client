@@ -1,0 +1,99 @@
+#!/bin/sh
+#
+# Copyright © 2015 Sébastien Gross <seb•ɑƬ•chezwam•ɖɵʈ•org>
+#
+# Created: 2015-01-02
+# Last changed: 2015-01-02 11:09:59
+#
+# This program is free software. It comes without any warranty, to
+# the extent permitted by applicable law. You can redistribute it
+# and/or modify it under the terms of the Do What The Fuck You Want
+# To Public License, Version 2, as published by Sam Hocevar. See
+# http://sam.zoy.org/wtfpl/COPYING for more details.
+#
+#
+#
+# Change the host name according to DHCP settings.
+#
+# If no hostname-$interface file is found, we do nothing. Thus you have to
+# explicitly specify the interface from which you want to bind the hostname.
+#
+# If your primary interface is eth0 you have to create the:
+# /etc/dhcp/dhclient-exit-hooks.d/hostname-eth0 file
+#
+# The hostname is looked in order from:
+#   - new_host_name environment variable given by the DHCP server
+#   - DNS resolution bases on $interface PTR record
+#   - In last ressort use the IP address: A.B.C.D -> A-B-C-D.
+#
+# Both "localhost-$interface" and "localhost-$interface.localdomain" entries
+# based on $interface $new_ip_address are added to /etc/hosts.
+
+CONF_DIR=/etc/dhcp/dhclient-exit-hooks.d
+FILE="$CONF_DIR/hostname-$interface"
+LOG="logger -t dhcp [hostname ($interface)]"
+MSG=
+LOCAL_HOST=$(echo "localhost-$interface" | sed 's/[^a-z0-9]/-/g')
+LOCAL_DOMAIN="localdomain"
+extra_host_name=""
+
+# For debuging purpose.
+# $LOG "new_host_name: '$new_host_name'"
+# $LOG "new_ip_address: '$new_ip_address'"
+# $LOG "new_old_address: '$new_old_address'"
+
+# only run if a hostname-IFACE file is found in the dhclient-exit-hooks.d
+# directory
+if [ ! -e $FILE ]; then
+    $LOG $FILE "not found"
+else
+    # If IP address hasn't change, do nothting
+    if [ -z "$new_ip_address" ]; then
+        $LOG "ip address didn't change"
+        exit 0
+    fi
+
+    hostname_to_set=""
+    # First try to setup hostname according dhcp option
+    if [ -n "$new_host_name" ]; then
+        if [ "$new_host_name" != "$old_host_name" ]; then
+            hostname_to_set="$new_host_name"
+            $LOG "found hostname ($hostname_to_set) in DHCP options"
+            fqdn=$(/usr/bin/host -t PTR $new_ip_address |
+                       sed -n 's/.* domain name pointer \(.*\)./\1/p')
+            extra_host_name="$fqdn $hostname_to_set"
+        fi
+    fi
+
+    # Otherwise
+    if [ -z "$hostname_to_set" ]; then
+        # try a DNS reverse resolution
+        fqdn=$(/usr/bin/host -t PTR $new_ip_address |
+		   sed -n 's/.* domain name pointer \(.*\)./\1/p')
+	hostname_to_set=$(echo $fqdn | cut -d. -f1)
+        if [ -n "$hostname_to_set" ]; then
+            $LOG "found hostname ($hostname_to_set) using DNS reverse"
+	    extra_host_name="$fqdn $hostname_to_set"
+	else
+            # Finaly setup the hostname against the interface IP address.
+            hostname_to_set=`echo $new_ip_address | sed 's/\./-/g'`
+            $LOG "found hostname ($hostname_to_set) using IP address"
+	    # Name sure A-B-C-D can also be resolved.
+	    # Note that neither 'host' nor 'dig' command will resolve user
+	    # the /etc/hosts file. For that you need to use:
+	    #   getent hosts HOSTNAME_OR_IP
+            extra_host_name="$hostname_to_set $hostname_to_set.$LOCAL_DOMAIN"
+        fi
+    fi
+
+    # Add localhost-INTERFACE localhost-INTERFACE.localdomain entry in /etc/hosts
+    grep -v " $LOCAL_HOST.$LOCAL_DOMAIN" /etc/hosts > /etc/hosts.tmp
+    echo "$new_ip_address $extra_host_name $LOCAL_HOST $LOCAL_HOST.$LOCAL_DOMAIN" >> /etc/hosts.tmp
+    mv /etc/hosts.tmp /etc/hosts
+
+    # Now we really set the hostname.
+    echo "$hostname_to_set" >/etc/hostname
+    /bin/hostname -F /etc/hostname
+    invoke-rc.d hostname restart >> /dev/null
+    $LOG "Set hostname to $hostname_to_set"
+fi
